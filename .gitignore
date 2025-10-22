@@ -1,23 +1,28 @@
-# ROS 2 build artifacts
+# === ROS 2 build artifacts ===
 build/
 install/
 log/
 
-# Python cache
+# === Python cache ===
 __pycache__/
 *.pyc
+*.pyo
 
-# Colcon and ament files
+# === Colcon / packaging ===
 *.egg-info/
 *.egg/
 *.log
 
-# Gazebo / simulation temp files
+# === Gazebo temporary or backup files ===
 *.world~
 *.sdf~
 *.bak
 *.tmp
 
-# OS files
+# Keep your real worlds and launch files
+!worlds/
+!launch/
+
+# === OS / editor junk ===
 .DS_Store
 Thumbs.db
