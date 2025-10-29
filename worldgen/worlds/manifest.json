@@ -1,0 +1,90 @@
+{
+  "env1_10": {
+    "world_file": "/home/sarah/ESE455_ws/worldgen/worlds/env1_10.world",
+    "target_fraction": 0.1,
+    "achieved_fraction": 0.09457245581578137,
+    "start_design_xy": [
+      3.449805603696288,
+      3.0490233581959023
+    ],
+    "goal_design_xy": [
+      2.5722558861251423,
+      8.720441600414457
+    ],
+    "start_world_xy": [
+      -1.550194396303712,
+      -1.9509766418040977
+    ],
+    "goal_world_xy": [
+      -2.4277441138748577,
+      3.720441600414457
+    ],
+    "goal_area_pct": 0.02010619298297468
+  },
+  "env2_20": {
+    "world_file": "/home/sarah/ESE455_ws/worldgen/worlds/env2_20.world",
+    "target_fraction": 0.2,
+    "achieved_fraction": 0.18593337691775574,
+    "start_design_xy": [
+      1.8164352452934318,
+      2.6874576310650813
+    ],
+    "goal_design_xy": [
+      3.639918722038624,
+      5.741793235040759
+    ],
+    "start_world_xy": [
+      -3.183564754706568,
+      -2.3125423689349187
+    ],
+    "goal_world_xy": [
+      -1.3600812779613758,
+      0.7417932350407588
+    ],
+    "goal_area_pct": 0.02010619298297468
+  },
+  "env3_30": {
+    "world_file": "/home/sarah/ESE455_ws/worldgen/worlds/env3_30.world",
+    "target_fraction": 0.3,
+    "achieved_fraction": 0.29342680839141816,
+    "start_design_xy": [
+      7.996549071353046,
+      7.230994439391782
+    ],
+    "goal_design_xy": [
+      3.995200642992777,
+      0.8495271021055418
+    ],
+    "start_world_xy": [
+      2.996549071353046,
+      2.2309944393917824
+    ],
+    "goal_world_xy": [
+      -1.0047993570072231,
+      -4.150472897894458
+    ],
+    "goal_area_pct": 0.02010619298297468
+  },
+  "env4_40": {
+    "world_file": "/home/sarah/ESE455_ws/worldgen/worlds/env4_40.world",
+    "target_fraction": 0.4,
+    "achieved_fraction": 0.3814786977661352,
+    "start_design_xy": [
+      1.912568023599481,
+      1.1377320434092537
+    ],
+    "goal_design_xy": [
+      9.184417820721611,
+      7.056993240052009
+    ],
+    "start_world_xy": [
+      -3.087431976400519,
+      -3.8622679565907463
+    ],
+    "goal_world_xy": [
+      4.184417820721611,
+      2.056993240052009
+    ],
+    "goal_area_pct": 0.02010619298297468
+  }
+}
