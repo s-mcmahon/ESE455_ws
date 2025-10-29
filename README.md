@@ -5,7 +5,7 @@ Open 3 terminal windows:
 1. Run the following (SIM): 
 ```bash
 cd ESE455_ws/
-colcon build --symliink
+colcon build --symlink-install
  export TURTLEBOT3_MODEL=burger
 ros2 launch tb3_custom_launch turtlebot3_custom_world.launch.py world:=../ESE455_ws/worldgen/worlds/env1_10.world
 
