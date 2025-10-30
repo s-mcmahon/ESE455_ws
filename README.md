@@ -16,7 +16,7 @@ ros2 launch tb3_custom_launch turtlebot3_custom_world.launch.py world:=../ESE455
  export TURTLEBOT3_MODEL=burger
  ros2 launch turtlebot3_bringup robot.launch.py
 ```
-3. Run the following (RRT): 
+3. Run the following (RRT): currently this is a waypoint follower for testing 
 ```bash 
 source /opt/ros/humble/setup.bash
 source ~/ESE455_ws/install/setup.bash
