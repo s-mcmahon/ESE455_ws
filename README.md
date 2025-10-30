@@ -18,4 +18,8 @@ ros2 launch tb3_custom_launch turtlebot3_custom_world.launch.py world:=../ESE455
 ```
 3. Run the following (RRT): 
 ```bash 
-TBD ```
+source /opt/ros/humble/setup.bash
+source ~/ESE455_ws/install/setup.bash
+export TURTLEBOT3_MODEL=burger
+ros2 run turtlebot3_example turtlebot3_relative_move
+```
