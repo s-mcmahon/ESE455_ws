@@ -13,12 +13,16 @@ ros2 launch tb3_custom_launch turtlebot3_custom_world.launch.py world:=../ESE455
 ```
 2. Run the following (SLAM): 
 ```bash
- export TURTLEBOT3_MODEL=burger
- ros2 launch turtlebot3_bringup robot.launch.py
+source ~/ESE455_ws/install/setup.bash
+ros2 run obstacle_detection obstacle_detection
 ```
+
 3. Run the following (RRT): 
 ```bash 
 source /opt/ros/humble/setup.bash
 source ~/ESE455_ws/install/setup.bash
 ros2 run unknown_rrt rrt_planner ../ESE455_ws/worldgen/worlds/env1_10.world
 ```
+
+
+Obstacles don't save on the occupency grid currently 
