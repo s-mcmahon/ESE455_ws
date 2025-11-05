@@ -21,18 +21,15 @@ class RRTPlanner(Node):
         self.goal_bias = 0.25
         self.goal_radius = 0.50
 
-        # Defaults (will be overridden by world)
         self.start = (-1.5, -2.0)
         self.goal = (-2.4, 3.7)
         self.sample_xmin, self.sample_xmax = -10.0, 10.0
         self.sample_ymin, self.sample_ymax = -10.0, 10.0
 
-        # Live state
         self.x = 0.0
         self.y = 0.0
         self.theta = 0.0
 
-        # Map info
         self.map_ready = False
         self.grid = None
         self.resolution = 0.1
@@ -41,7 +38,6 @@ class RRTPlanner(Node):
         self.origin_x = 0.0
         self.origin_y = 0.0
 
-        # ROS subs
         self.create_subscription(Odometry, 'odom', self.odom_callback, 10)
         self.create_subscription(OccupancyGrid, '/obstacle_grid', self.grid_callback, 10)
 

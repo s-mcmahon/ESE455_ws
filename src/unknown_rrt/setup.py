@@ -20,6 +20,9 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'geometric_planner = unknown_rrt.geometric_planner:main',
+            # reusable RRT planner (for testing or reuse)
+            'rrt_planner = unknown_rrt.rrt_planner:main',
         ],
     },
 )

@@ -24,5 +24,10 @@ source ~/ESE455_ws/install/setup.bash
 ros2 run unknown_rrt rrt_planner ../ESE455_ws/worldgen/worlds/env1_10.world
 ```
 
+ ```bash 
+source /opt/ros/humble/setup.bash
+source ~/ESE455_ws/install/setup.bash
+ros2 run unknown_rrt geometric_planner ../ESE455_ws/worldgen/worlds/env1_10.world
+```
 
 Obstacles don't save on the occupency grid currently 
