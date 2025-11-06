@@ -8,7 +8,7 @@ cd ESE455_ws/
 colcon build --symlink-install
 source install/setup.bash
 export TURTLEBOT3_MODEL=waffle
-ros2 launch tb3_custom_launch turtlebot3_custom_world.launch.py world:=../ESE455_ws/worldgen/worlds/env1.world
+ros2 launch tb3_custom_launch turtlebot3_custom_world.launch.py world:=../ESE455_ws/worldgen/worlds/empty.world
 
 ```
 2. Run the following (SLAM): 
@@ -27,5 +27,5 @@ ros2 run unknown_rrt rrt_planner ~/ESE455_ws/worldgen/worlds/env1.world
  ```bash 
 source /opt/ros/humble/setup.bash
 source ~/ESE455_ws/install/setup.bash
-ros2 run unknown_rrt geometric_planner ~/ESE455_ws/worldgen/worlds/env1.world
+ros2 run unknown_rrt geometric_planner ~/ESE455_ws/worldgen/worlds/test.world
 ```

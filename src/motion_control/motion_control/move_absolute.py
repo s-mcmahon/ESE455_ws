@@ -18,6 +18,7 @@ class MoveAbsolute(Node):
         self.y = 0.0
         self.theta = 0.0
 
+        # Motion tuning
         self.dist_tol = 0.25   # allow 25 cm tolerance
         self.angle_tol = 0.2   # allow ~11° tolerance
 
