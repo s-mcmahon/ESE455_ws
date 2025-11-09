@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
-# start.sh
 
-# Stop on error and print commands, but allow unset vars while sourcing ROS
 set -e
 set +u
 source /opt/ros/humble/setup.bash
 set -u
-# (If you have a workspace)
-# set +u; source ~/turtlebot3_ws/install/setup.bash; set -u
 
 ENV="${1:-env1_10}"
 export TURTLEBOT3_MODEL=waffle_pi
