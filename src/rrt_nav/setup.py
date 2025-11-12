@@ -28,6 +28,8 @@ setup(
         'console_scripts': [
             'rrt_nav_node = rrt_nav.rrt_nav_node:main',
             'kino_rrt_nav_node = rrt_nav.kino_rrt_nav_node:main',
+            'dynamic_layer_pub = rrt_nav.dynamic_layer_pub:main',
+            'dynamic_rrt_nav_node = rrt_nav.dynamic_rrt_nav_node:main',
             'rrt_metrics_node = rrt_nav.rrt_metrics_node:main',
         ],
     },
