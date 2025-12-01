@@ -1,28 +1,38 @@
-# Imports
-import math, random, time, numpy as np, rclpy
+#!/usr/bin/env python3
+
+import math
+import random
+import time
+import numpy as np
+
+import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
+
 from nav_msgs.msg import OccupancyGrid, Path
 from geometry_msgs.msg import PoseStamped, Quaternion
-from nav2_simple_commander.robot_navigator import BasicNavigator
-from tf2_ros import Buffer, TransformListener
-from rclpy.duration import Duration
 from std_msgs.msg import Bool
 
-# Angle Helper
-def q_from_yaw(yaw):
-    from math import sin, cos
+from nav2_simple_commander.robot_navigator import BasicNavigator
+from tf2_ros import Buffer, TransformListener
+
+
+# ------------ Angle helper ------------
+def q_from_yaw(yaw: float) -> Quaternion:
     q = Quaternion()
-    q.z = sin(yaw / 2.0)
-    q.w = cos(yaw / 2.0)
+    q.z = math.sin(yaw / 2.0)
+    q.w = math.cos(yaw / 2.0)
     return q
+
 
 class RRTPlannerNav2(Node):
     def __init__(self):
         super().__init__('rrt_planner_nav2')
 
-        # parameters
+        # ---------------- Parameters ----------------
         self.declare_parameter('robot_radius', 0.0)
-        self.declare_parameter('safety_margin', 0.1)
+        self.declare_parameter('safety_margin', 0.4)
         self.declare_parameter('max_iters', 2000)
         self.declare_parameter('goal_bias', 0.35)
         self.declare_parameter('goal_radius', 0.8)
@@ -30,7 +40,7 @@ class RRTPlannerNav2(Node):
         self.declare_parameter('goal_y', 3.8)
         self.declare_parameter('unknown_is_free', True)
 
-        # dynamics parameters
+        # dynamics
         self.declare_parameter('v_max', 0.25)
         self.declare_parameter('w_max', 1.82)
         self.declare_parameter('dt', 0.1)
@@ -39,55 +49,70 @@ class RRTPlannerNav2(Node):
         self.declare_parameter('steer_to_goal_prob', 0.6)
         self.declare_parameter('min_waypoint_separation', 0.6)
         self.declare_parameter('max_waypoints', 20)
+
         if not self.has_parameter('use_sim_time'):
             self.declare_parameter('use_sim_time', True)
 
-        # state 
+        # ---------------- State ----------------
         self.grid = None
         self.resolution = 0.05
         self.w = self.h = 0
         self.ox = self.oy = 0.0
+
         self.task_active = False
         self.success_announced = False
 
-        # throttles
         self.last_plan_time = 0.0
-        self.plan_cooldown = 6.0
-        self.last_publish_time = 0.0
-        self.min_publish_period = 4.0
+        self.plan_cooldown = 3.0
 
-        # TF + Nav2
-        self.tf = Buffer(cache_time=Duration(seconds=10))
+        # ---- NEW: Persistent local frame origin ----
+        self.initial_origin_set = False
+        self.local_origin = (0.0, 0.0)
+
+        # ---------------- TF + Nav2 ----------------
+        self.tf = Buffer(cache_time=Duration(seconds=10.0))
         self.tfl = TransformListener(self.tf, self)
         self.nav = BasicNavigator()
 
-        # pubs/subs
-        self.create_subscription(OccupancyGrid, '/map', self.on_map, 10)
+        # ---------------- Subscriptions / Pubs ----------------
+        map_qos = QoSProfile(
+            depth=1,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=QoSReliabilityPolicy.RELIABLE
+        )
+        self.create_subscription(OccupancyGrid, '/map', self.on_map, map_qos)
+
         self.path_pub = self.create_publisher(Path, '/rrt_path', 10)
         self.waypoint_pub = self.create_publisher(Path, '/rrt_waypoints', 10)
         self.replan_pub = self.create_publisher(Bool, '/rrt_replan', 10)
         self.goal_reached_pub = self.create_publisher(Bool, '/rrt_goal_reached', 10)
+
         self.create_timer(0.5, self.tick)
-        self.get_logger().info("Kinodynamic RRTPlannerNav2 ready (drives Nav2 using SLAM /map).")
 
+        self.get_logger().info("Kinodynamic RRTPlannerNav2 ready.")
 
-
-
-    # ------------ Occupancy Grid  ------------
+    # ------------ Occupancy Grid handling ------------
     def on_map(self, msg: OccupancyGrid):
         self.resolution = msg.info.resolution
-        self.w, self.h = msg.info.width, msg.info.height
+        self.w = msg.info.width
+        self.h = msg.info.height
         self.ox = msg.info.origin.position.x
         self.oy = msg.info.origin.position.y
+
         data = np.array(msg.data, dtype=np.int16).reshape(self.h, self.w)
+
         grid = np.zeros_like(data, dtype=np.int8)
         grid[data == -1] = -1
         grid[data >= 50] = 1
-        rad = float(self.get_parameter('robot_radius').value) + float(self.get_parameter('safety_margin').value)
+
+        rad = float(self.get_parameter('robot_radius').value) + \
+              float(self.get_parameter('safety_margin').value)
+
         if rad > 0.0:
             r_cells = max(1, int(rad / self.resolution))
             occ = (grid == 1).astype(np.uint8)
             dil = occ.copy()
+
             for di in range(-r_cells, r_cells + 1):
                 for dj in range(-r_cells, r_cells + 1):
                     if di * di + dj * dj <= r_cells * r_cells:
@@ -96,17 +121,22 @@ class RRTPlannerNav2(Node):
                         ys2 = slice(max(0, -dj), self.h - max(0, dj))
                         xs2 = slice(max(0, -di), self.w - max(0, di))
                         dil[ys, xs] |= occ[ys2, xs2]
-            grid[dil > 0] = 1
-        self.grid = grid
 
-    # ------------ Helper Funcs ------------
+            grid[dil > 0] = 1
+
+        self.grid = grid
+        self.get_logger().info("Map received.")
+
+    # ------------ Helpers ------------
     def world_to_grid(self, x, y):
-        return int((x - self.ox) / self.resolution), int((y - self.oy) / self.resolution)
+        i = int((x - self.ox) / self.resolution)
+        j = int((y - self.oy) / self.resolution)
+        return i, j
 
     def inside(self, i, j):
         return 0 <= i < self.w and 0 <= j < self.h
 
-    def is_free_xy(self, x, y):
+    def is_free_xy(self, x, y) -> bool:
         if self.grid is None:
             return False
         i, j = self.world_to_grid(x, y)
@@ -115,97 +145,150 @@ class RRTPlannerNav2(Node):
         v = self.grid[j, i]
         if v == 1:
             return False
-        if v == -1:
+        if v == -1:  # unknown
             return bool(self.get_parameter('unknown_is_free').value)
         return True
 
     def project_to_free(self, x, y, max_r=1.0):
         step = self.resolution
-        for r in np.arange(0, max_r, step):
-            for th in np.linspace(0, 2 * math.pi, 36):
+        for r in np.arange(0.0, max_r + 1e-6, step):
+            for th in np.linspace(0, 2 * math.pi, 48):
                 nx = x + r * math.cos(th)
                 ny = y + r * math.sin(th)
                 if self.is_free_xy(nx, ny):
                     return (nx, ny)
         return None
 
-    # ------------ Kinodynamic RRT ------------
-    def kinodynamic_rrt_once(self, start, goal, step_time=None, dt=None, max_iters=800, goal_bias=0.2):
+    # ------------ TF helper ------------
+    def get_robot_pose(self):
+        candidates = [
+            ('map', 'base_link'),
+            ('map', 'base_footprint'),
+            ('odom', 'base_link'),
+            ('odom', 'base_footprint'),
+        ]
+
+        for parent, child in candidates:
+            try:
+                t = self.tf.lookup_transform(parent, child, rclpy.time.Time())
+                x = float(t.transform.translation.x)
+                y = float(t.transform.translation.y)
+                q = t.transform.rotation
+
+                siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+                cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+                th = math.atan2(siny_cosp, cosy_cosp)
+                return (x, y, th), parent
+            except Exception:
+                continue
+        return None, None
+
+    # ------------ Kinodynamic RRT core (local frame) ------------
+    def kinodynamic_rrt_once(
+        self, start, goal, local_origin,
+        step_time=None, dt=None, max_iters=None, goal_bias=None
+    ):
+        origin_x, origin_y = local_origin
+
         if step_time is None:
             step_time = float(self.get_parameter('step_time').value)
         if dt is None:
             dt = float(self.get_parameter('dt').value)
+        if max_iters is None:
+            max_iters = int(self.get_parameter('max_iters').value)
+        if goal_bias is None:
+            goal_bias = float(self.get_parameter('goal_bias').value)
+
         v_max = float(self.get_parameter('v_max').value)
         w_max = float(self.get_parameter('w_max').value)
         goal_radius = float(self.get_parameter('goal_radius').value)
         controls_per_expand = int(self.get_parameter('controls_per_expand').value)
         steer_p = float(self.get_parameter('steer_to_goal_prob').value)
+
         nodes = [start]
         parents = {start: None}
+
         for _ in range(max_iters):
+
+            # ---- Sample ----
             if random.random() < goal_bias:
                 x_rand, y_rand, th_rand = goal
             else:
-                x_rand = random.uniform(self.ox, self.ox + self.w * self.resolution)
-                y_rand = random.uniform(self.oy, self.oy + self.h * self.resolution)
+                xw = random.uniform(self.ox, self.ox + self.w * self.resolution)
+                yw = random.uniform(self.oy, self.oy + self.h * self.resolution)
+                x_rand = xw - origin_x
+                y_rand = yw - origin_y
                 th_rand = random.uniform(-math.pi, math.pi)
-            if not self.is_free_xy(x_rand, y_rand):
+
+            if not self.is_free_xy(x_rand + origin_x, y_rand + origin_y):
                 continue
+
+            # ---- Nearest neighbor ----
             nearest = min(nodes, key=lambda n: math.hypot(n[0] - x_rand, n[1] - y_rand))
-            best_new, min_dist = None, float('inf')
-            # sample controls
+
+            best_new = None
+            min_dist = float('inf')
+
             for _ in range(controls_per_expand):
+                dx = x_rand - nearest[0]
+                dy = y_rand - nearest[1]
+                desired_yaw = math.atan2(dy, dx)
+
+                yaw_err = (desired_yaw - nearest[2] + math.pi) % (2 * math.pi) - math.pi
+
                 if random.random() < steer_p:
-                    dx, dy = x_rand - nearest[0], y_rand - nearest[1]
-                    desired_yaw = math.atan2(dy, dx)
-                    yaw_err = (desired_yaw - nearest[2] + math.pi) % (2 * math.pi) - math.pi
                     w = max(-w_max, min(w_max, yaw_err / step_time))
-                    u = 0.8 * v_max if abs(yaw_err) < math.pi/3 else 0.4 * v_max
+                    u = 0.8 * v_max if abs(yaw_err) < math.pi / 3 else 0.4 * v_max
                 else:
-                    u = random.uniform(0.0, v_max)
+                    u = random.uniform(0, v_max)
                     w = random.uniform(-w_max, w_max)
+
                 x, y, th = nearest
-                traj = [(x, y, th)]
                 t = 0.0
                 valid = True
+
                 while t < step_time:
                     x += u * math.cos(th) * dt
                     y += u * math.sin(th) * dt
                     th += w * dt
-                    if not self.is_free_xy(x, y):
+
+                    if not self.is_free_xy(x + origin_x, y + origin_y):
                         valid = False
                         break
-                    traj.append((x, y, th))
                     t += dt
+
                 if not valid:
                     continue
+
                 dist = math.hypot(x - x_rand, y - y_rand)
                 if dist < min_dist:
-                    best_new = (x, y, th)
                     min_dist = dist
-            if best_new:
-                nodes.append(best_new)
-                parents[best_new] = nearest
-                if math.hypot(best_new[0] - goal[0], best_new[1] - goal[1]) < goal_radius:
-                    path = [best_new]
-                    cur = best_new
-                    while parents[cur] is not None:
-                        cur = parents[cur]
-                        path.append(cur)
-                    return list(reversed(path))
+                    best_new = (x, y, th)
+
+            if best_new is None:
+                continue
+
+            nodes.append(best_new)
+            parents[best_new] = nearest
+
+            if math.hypot(best_new[0] - goal[0], best_new[1] - goal[1]) < goal_radius:
+                path = [best_new]
+                cur = best_new
+                while parents[cur] is not None:
+                    cur = parents[cur]
+                    path.append(cur)
+                return list(reversed(path))
+
         return []
 
-    # ------------ Publishing PAth ------------
+    # ------------ Path helpers ------------
     def downsample_path(self, pts, min_sep=0.5):
         if not pts:
             return []
         new_pts = [pts[0]]
         for p in pts[1:]:
-            dx = p[0] - new_pts[-1][0]
-            dy = p[1] - new_pts[-1][1]
-            if math.hypot(dx, dy) >= min_sep:
+            if math.hypot(p[0] - new_pts[-1][0], p[1] - new_pts[-1][1]) >= min_sep:
                 new_pts.append(p)
-        # always keep the goal
         if new_pts[-1] != pts[-1]:
             new_pts.append(pts[-1])
         return new_pts
@@ -213,117 +296,154 @@ class RRTPlannerNav2(Node):
     def publish_path(self, pts):
         if len(pts) < 2:
             return [], []
+
         msg = Path()
         msg.header.frame_id = 'map'
         msg.header.stamp = self.get_clock().now().to_msg()
+
         poses = []
         for (x, y, th) in pts:
             ps = PoseStamped()
             ps.header.frame_id = 'map'
             ps.header.stamp = msg.header.stamp
-            ps.pose.position.x = float(x)
-            ps.pose.position.y = float(y)
+            ps.pose.position.x = x
+            ps.pose.position.y = y
             ps.pose.orientation = q_from_yaw(th)
             poses.append(ps)
+
         msg.poses = poses
         self.path_pub.publish(msg)
         self.waypoint_pub.publish(msg)
         self.replan_pub.publish(Bool(data=True))
+
         return poses, pts
 
-    # ------------ MAin logic ------------
+    # ------------ Main periodic tick ------------
     def tick(self):
         if self.grid is None or self.success_announced:
             return
-        try:
-            t = self.tf.lookup_transform('map', 'base_link', rclpy.time.Time())
-            x = float(t.transform.translation.x)
-            y = float(t.transform.translation.y)
-            q = t.transform.rotation
-            siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-            cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
-            th = math.atan2(siny_cosp, cosy_cosp)
-            pose = (x, y, th)
-        except Exception:
-            self.get_logger().info("Waiting for TF map->base_link…")
-            return
-        sproj = self.project_to_free(pose[0], pose[1], max_r=0.5)
-        if sproj is None:
-            self.get_logger().warn("Start in collision, cannot project to free space.")
-            return
-        pose = (sproj[0], sproj[1], pose[2])
 
-        goal = (
+        pose, parent_frame = self.get_robot_pose()
+        if pose is None:
+            self.get_logger().info("Waiting for TF...")
+            return
+
+        x, y, th = pose
+
+        # Project current robot pose into free space
+        sproj = self.project_to_free(x, y, max_r=0.5)
+        if sproj is None:
+            self.get_logger().warn("Start in collision.")
+            return
+
+        start_world = (sproj[0], sproj[1], th)
+
+        # ---- Set local origin ONCE ----
+        if not self.initial_origin_set:
+            self.local_origin = (start_world[0], start_world[1])
+            self.initial_origin_set = True
+            self.get_logger().info(
+                f"Local RRT frame origin set at world ({start_world[0]:.2f}, {start_world[1]:.2f})"
+            )
+
+        origin_x, origin_y = self.local_origin
+
+        # Convert robot pose into fixed local frame
+        start_local = (
+            start_world[0] - origin_x,
+            start_world[1] - origin_y,
+            start_world[2],
+        )
+
+        # ---- Goal ----
+        goal_world = (
             float(self.get_parameter('goal_x').value),
             float(self.get_parameter('goal_y').value),
             0.0,
         )
-        gproj = self.project_to_free(goal[0], goal[1], max_r=2.0)
+
+        gproj = self.project_to_free(goal_world[0], goal_world[1], max_r=2.0)
         if gproj is None:
             self.get_logger().warn("Goal not projectable to free space.")
             return
-        goal = (gproj[0], gproj[1], goal[2])
-        goal_radius = float(self.get_parameter('goal_radius').value)
-        if math.hypot(pose[0] - goal[0], pose[1] - goal[1]) <= goal_radius:
-            self.announce_success()
-            return
+
+        goal_world = (gproj[0], gproj[1], 0.0)
+
+        goal_local = (
+            goal_world[0] - origin_x,
+            goal_world[1] - origin_y,
+            0.0,
+        )
+
         now = time.time()
         if now - self.last_plan_time < self.plan_cooldown:
             return
         self.last_plan_time = now
-        self.get_logger().info("Planning with kinodynamic RRT...")
-        path = self.kinodynamic_rrt_once(
-            start=pose,
-            goal=goal,
-            step_time=float(self.get_parameter('step_time').value),
-            dt=float(self.get_parameter('dt').value),
-            max_iters=int(self.get_parameter('max_iters').value),
-            goal_bias=float(self.get_parameter('goal_bias').value),
+
+        self.get_logger().info(
+            f"Planning in LOCAL frame: start=({start_local[0]:.2f},{start_local[1]:.2f}) "
+            f"goal=({goal_local[0]:.2f},{goal_local[1]:.2f})"
         )
-        if len(path) < 2:
-            self.get_logger().warn("No valid path found.")
+
+        path_local = self.kinodynamic_rrt_once(
+            start=start_local,
+            goal=goal_local,
+            local_origin=self.local_origin
+        )
+
+        if len(path_local) < 2:
+            self.get_logger().warn("No path found.")
             return
-        min_sep = float(self.get_parameter('min_waypoint_separation').value)
-        path_ds = self.downsample_path(path, min_sep)
-        poses, pts_sent = self.publish_path(path_ds)
-        if not poses:
-            return
+
+        # Convert back to world frame
+        path_world = [
+            (px + origin_x, py + origin_y, th)
+            for (px, py, th) in path_local
+        ]
+
+        path_ds = self.downsample_path(path_world)
+        poses, _ = self.publish_path(path_ds)
+
         if len(poses) <= 2:
             self.nav.goToPose(poses[-1])
-            self.get_logger().info("Sent single kinodynamic goal to Nav2.")
         else:
             self.nav.followWaypoints(poses)
-            self.get_logger().info(f"Sent {len(poses)} kinodynamic waypoints to Nav2.")
-        self.task_active = True
-        self.last_publish_time = now
 
-    # ------------ REached Goal? ------------
+        self.task_active = True
+
+    # ------------ Goal reached handling ------------
     def announce_success(self):
         if self.success_announced:
             return
         self.success_announced = True
-        self.get_logger().info("Goal reached (within goal_radius). Stopping planner and shutting down.")
         self.goal_reached_pub.publish(Bool(data=True))
+
         try:
-            if hasattr(self.nav, "cancelTask"):
-                self.nav.cancelTask()
+            self.nav.cancelTask()
         except Exception:
             pass
-        self.get_clock().sleep_for(Duration(seconds=0.5))
+
+        time.sleep(0.5)
         self.destroy_node()
         rclpy.shutdown()
         import sys
         sys.exit(0)
 
+
 def main():
     rclpy.init()
+    executor = rclpy.executors.MultiThreadedExecutor()
     node = RRTPlannerNav2()
+    executor.add_node(node)
+
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
+
     node.destroy_node()
     rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
