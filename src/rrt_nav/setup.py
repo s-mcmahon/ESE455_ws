@@ -31,6 +31,7 @@ setup(
             'dynamic_layer_pub = rrt_nav.dynamic_layer_pub:main',
             'dynamic_rrt_nav_node = rrt_nav.dynamic_rrt_nav_node:main',
             'rrt_metrics_node = rrt_nav.rrt_metrics_node:main',
+            'onboard_kino_rrt_node = rrt_nav.onboard_kino_rrt:main',
         ],
     },
 )
