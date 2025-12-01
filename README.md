@@ -8,7 +8,7 @@ cd ESE455_ws/
 colcon build --symlink-install
 source install/setup.bash
 export TURTLEBOT3_MODEL=waffle
-ros2 launch tb3_custom_launch  tb3_nav_offboard.launch.py use_slam:=true use_nav2:=true
+ros2 launch tb3_custom_launch  tb3_nav_offboard.launch.py use_slam:=True use_nav2:=True
 #ros2 launch tb3_custom_launch turtlebot3_custom_world.launch.py \
     world:=/home/$USER/ESE455_ws/worlds/env1.world \
     x_pose:=-0 y_pose:=-0 \
