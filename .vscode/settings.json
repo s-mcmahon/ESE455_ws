@@ -1,0 +1,20 @@
+{
+    "python.autoComplete.extraPaths": [
+        "/home/sarah/turtlebot3_ws/install/dynamixel_sdk_custom_interfaces/local/lib/python3.10/dist-packages",
+        "/home/sarah/ESE455_ws/build/tb3_custom_launch",
+        "/home/sarah/ESE455_ws/install/tb3_custom_launch/lib/python3.10/site-packages",
+        "/home/sarah/ESE455_ws/build/rrt_nav",
+        "/home/sarah/ESE455_ws/install/rrt_nav/lib/python3.10/site-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/sarah/turtlebot3_ws/install/dynamixel_sdk_custom_interfaces/local/lib/python3.10/dist-packages",
+        "/home/sarah/ESE455_ws/build/tb3_custom_launch",
+        "/home/sarah/ESE455_ws/install/tb3_custom_launch/lib/python3.10/site-packages",
+        "/home/sarah/ESE455_ws/build/rrt_nav",
+        "/home/sarah/ESE455_ws/install/rrt_nav/lib/python3.10/site-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages"
+    ]
+}
