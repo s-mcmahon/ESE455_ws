@@ -32,7 +32,7 @@ class RRTPlannerNav2(Node):
 
         # ---------------- Parameters ----------------
         self.declare_parameter('robot_radius', 0.25)
-        self.declare_parameter('safety_margin', 0.1)
+        self.declare_parameter('safety_margin', 0.0)
         self.declare_parameter('front_buffer_extra', 0.1)
         self.declare_parameter('rear_buffer_extra', 0.0)
         self.declare_parameter('max_iters', 1000)
