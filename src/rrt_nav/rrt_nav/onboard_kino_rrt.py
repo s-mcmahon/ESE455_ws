@@ -31,23 +31,16 @@ class RRTPlannerNav2(Node):
         super().__init__('rrt_planner_nav2')
 
         # ---------------- Parameters ----------------
-        # Keep robot_radius=0 and safety_margin=0.4 for a global 0.4 buffer everywhere.
-        self.declare_parameter('robot_radius', 0.0)
-        self.declare_parameter('safety_margin', 0.4)
-
-        # Directional buffers used inside the kinodynamic rollout:
-        # extra distance checked in front (forward 180 deg) and rear.
-        self.declare_parameter('front_buffer_extra', 0.1)  # gives ~0.5 vs 0.4 elsewhere
+        self.declare_parameter('robot_radius', 0.22)
+        self.declare_parameter('safety_margin', 0.1)
+        self.declare_parameter('front_buffer_extra', 0.1)
         self.declare_parameter('rear_buffer_extra', 0.0)
-
         self.declare_parameter('max_iters', 2000)
         self.declare_parameter('goal_bias', 0.35)
-        self.declare_parameter('goal_radius', 0.8)
+        self.declare_parameter('goal_radius', 0.05)
         self.declare_parameter('goal_x', 3.8)
         self.declare_parameter('goal_y', 3.8)
         self.declare_parameter('unknown_is_free', True)
-
-        # dynamics
         self.declare_parameter('v_max', 0.25)
         self.declare_parameter('w_max', 1.82)
         self.declare_parameter('dt', 0.1)
@@ -72,11 +65,9 @@ class RRTPlannerNav2(Node):
         self.last_plan_time = 0.0
         self.plan_cooldown = 3.0
 
-        # Persistent local frame origin (for RRT local coordinates)
         self.initial_origin_set = False
         self.local_origin = (0.0, 0.0)
 
-        # Track current goal in world frame so we can measure distance at the end
         self.current_goal_world = None
 
         # ---------------- TF + Nav2 ----------------
@@ -97,9 +88,7 @@ class RRTPlannerNav2(Node):
         self.replan_pub = self.create_publisher(Bool, '/rrt_replan', 10)
         self.goal_reached_pub = self.create_publisher(Bool, '/rrt_goal_reached', 10)
 
-        # Main periodic planner tick
         self.create_timer(0.5, self.tick)
-        # Nav2 task status monitor (to stop at goal or on failure)
         self.create_timer(0.2, self.check_nav_status)
 
         self.get_logger().info("Kinodynamic RRTPlannerNav2 ready.")
@@ -119,7 +108,7 @@ class RRTPlannerNav2(Node):
         grid[data == -1] = -1
         grid[data >= 50] = 1
 
-        # Inflate obstacles by robot_radius + safety_margin (isotropic)
+        # Inflate obstacles by robot_radius + safety_margin
         rad = float(self.get_parameter('robot_radius').value) + \
               float(self.get_parameter('safety_margin').value)
 
@@ -160,7 +149,7 @@ class RRTPlannerNav2(Node):
         v = self.grid[j, i]
         if v == 1:
             return False
-        if v == -1:  # unknown
+        if v == -1:
             return bool(self.get_parameter('unknown_is_free').value)
         return True
 
@@ -176,10 +165,6 @@ class RRTPlannerNav2(Node):
 
     # ------------ TF helper ------------
     def get_robot_pose(self):
-        """
-        Return robot pose strictly in the 'map' frame.
-        Avoid mixing 'map' and 'odom' to prevent drift-related inconsistencies.
-        """
         try:
             t = self.tf.lookup_transform('map', 'base_footprint', rclpy.time.Time())
         except Exception:
@@ -458,50 +443,109 @@ class RRTPlannerNav2(Node):
             self.nav.followWaypoints(poses)
 
         self.task_active = True
-
     # ------------ Nav2 status monitoring ------------
     def check_nav_status(self):
-        """
-        Monitor Nav2 task and stop when:
-        - goal is reached, or
-        - Nav2 reports failure / cancellation.
-        """
         if not self.task_active or self.success_announced:
             return
 
-        # If Nav2 is still executing the current task, do nothing
         if not self.nav.isTaskComplete():
             return
 
-        # Task finished; inspect result
         result = self.nav.getResult()
-        self.task_active = False  # clear navigation flag
+        self.task_active = False
 
         goal_radius = float(self.get_parameter('goal_radius').value)
 
-        # Measure distance to current goal in world frame
         close_enough = False
-        pose, _ = self.get_robot_pose()
-        if pose is not None and self.current_goal_world is not None:
+
+        # -------------------------------
+        # NEW ODOM-BASED GOAL DISTANCE CHECK
+        # -------------------------------
+        try:
+            # robot in odom
+            trot = self.tf.lookup_transform("odom", "base_footprint", rclpy.time.Time())
+            rx = trot.transform.translation.x
+            ry = trot.transform.translation.y
+
+            # goal (currently stored in map frame) -> transform to odom
             gx, gy, _ = self.current_goal_world
-            dx = pose[0] - gx
-            dy = pose[1] - gy
-            dist = math.hypot(dx, dy)
-            self.get_logger().info(f"Goal distance after nav task: {dist:.2f} m")
+            # ---------------------------------------------------------
+            # DEBUG PRINTS: robot & goal in map, odom, and local RRT
+            # ---------------------------------------------------------
+
+            # Robot in MAP frame
+            try:
+                t_map = self.tf.lookup_transform("map", "base_footprint", rclpy.time.Time())
+                self.get_logger().info(
+                    f"[DEBUG] Robot (map): x={t_map.transform.translation.x:.3f}, "
+                    f"y={t_map.transform.translation.y:.3f}"
+                )
+            except Exception:
+                self.get_logger().warn("[DEBUG] Could not get robot pose in map frame")
+
+            # Goal in MAP frame
+            self.get_logger().info(
+                f"[DEBUG] Goal  (map): x={gx:.3f}, y={gy:.3f}"
+            )
+
+            # Robot in ODOM frame (we already have rx, ry)
+            self.get_logger().info(
+                f"[DEBUG] Robot (odom): x={rx:.3f}, y={ry:.3f}"
+            )
+
+            # Goal in ODOM frame (after transform)
+            goal_ps = PoseStamped()
+            goal_ps.header.frame_id = "map"
+            goal_ps.pose.position.x = gx
+            goal_ps.pose.position.y = gy
+            goal_odom = self.tf.transform(goal_ps, "odom")
+
+            gx_o = goal_odom.pose.position.x
+            gy_o = goal_odom.pose.position.y
+
+            self.get_logger().info(
+                f"[DEBUG] Goal  (odom): x={gx_o:.3f}, y={gy_o:.3f}"
+            )
+
+            # Also print the LOCAL RRT frame values
+            origin_x, origin_y = self.local_origin
+
+            self.get_logger().info(
+                f"[DEBUG] Local RRT Start: x={(rx - origin_x):.3f}, y={(ry - origin_y):.3f}"
+            )
+
+            self.get_logger().info(
+                f"[DEBUG] Local RRT Goal: x={(gx - origin_x):.3f}, y={(gy - origin_y):.3f}"
+            )
+
+            goal_ps = PoseStamped()
+            goal_ps.header.frame_id = "map"
+            goal_ps.pose.position.x = gx
+            goal_ps.pose.position.y = gy
+
+            goal_odom = self.tf.transform(goal_ps, "odom")
+
+            gx_o = goal_odom.pose.position.x
+            gy_o = goal_odom.pose.position.y
+
+            dist = math.hypot(gx_o - rx, gy_o - ry)
+            self.get_logger().info(f"[ODOM dist] {dist:.3f}")
             close_enough = dist < goal_radius
 
-        # Consider either Nav2 success OR being within goal_radius as success
+        except Exception as e:
+            self.get_logger().warn(f"Transform error in odom distance check: {e}")
+            close_enough = False
+
+        # If Nav2 succeeded OR physically close:
         if result == TaskResult.SUCCEEDED or close_enough:
             self.get_logger().info(f"Goal reached (Nav2 result={result}). Stopping.")
             self.announce_success()
         else:
-            # Treat as unreachable / blocked -> stop and do NOT replan
             self.get_logger().warn(f"Nav2 failed with result={result}. Goal unreachable, stopping.")
             try:
                 self.nav.cancelTask()
             except Exception:
                 pass
-            # Prevent further planning
             self.success_announced = True
 
     # ------------ Goal reached handling ------------

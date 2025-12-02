@@ -31,7 +31,7 @@ class RRTPlannerNav2(Node):
         super().__init__('rrt_planner_nav2')
 
         # ---------------- Parameters ----------------
-        self.declare_parameter('robot_radius', 0.0)
+        self.declare_parameter('robot_radius', 0.22)
         self.declare_parameter('safety_margin', 0.4)
         self.declare_parameter('max_iters', 2000)
         self.declare_parameter('goal_bias', 0.35)
