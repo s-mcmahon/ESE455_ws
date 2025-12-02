@@ -31,13 +31,13 @@ class RRTPlannerNav2(Node):
         super().__init__('rrt_planner_nav2')
 
         # ---------------- Parameters ----------------
-        self.declare_parameter('robot_radius', 0.22)
+        self.declare_parameter('robot_radius', 0.25)
         self.declare_parameter('safety_margin', 0.1)
         self.declare_parameter('front_buffer_extra', 0.1)
         self.declare_parameter('rear_buffer_extra', 0.0)
-        self.declare_parameter('max_iters', 2000)
-        self.declare_parameter('goal_bias', 0.35)
-        self.declare_parameter('goal_radius', 0.05)
+        self.declare_parameter('max_iters', 1000)
+        self.declare_parameter('goal_bias', 0.5)
+        self.declare_parameter('goal_radius', 0.3)  # be a bit generous
         self.declare_parameter('goal_x', 3.8)
         self.declare_parameter('goal_y', 3.8)
         self.declare_parameter('unknown_is_free', True)
@@ -48,16 +48,28 @@ class RRTPlannerNav2(Node):
         self.declare_parameter('controls_per_expand', 40)
         self.declare_parameter('steer_to_goal_prob', 0.6)
         self.declare_parameter('min_waypoint_separation', 0.6)
-        self.declare_parameter('max_waypoints', 20)
+        self.declare_parameter('max_waypoints', 30)
+
+        # Big global map span (meters) for our own fused map
+        self.declare_parameter('global_span_x', 40.0)  # total width in meters
+        self.declare_parameter('global_span_y', 40.0)  # total height in meters
 
         if not self.has_parameter('use_sim_time'):
             self.declare_parameter('use_sim_time', True)
 
         # ---------------- State ----------------
-        self.grid = None
+        # Original Nav2 map info
         self.resolution = 0.05
-        self.w = self.h = 0
-        self.ox = self.oy = 0.0
+        self.map_w = self.map_h = 0
+        self.map_ox = self.map_oy = 0.0
+
+        # Big global grid we maintain ourselves
+        self.global_grid = None          # np.int8, -1=unknown, 0=free, 1=occ
+        self.global_w = 0
+        self.global_h = 0
+        self.global_ox = 0            # origin of big grid in world coords
+        self.global_oy = 0
+        self.global_initialized = False
 
         self.task_active = False
         self.success_announced = False
@@ -88,25 +100,88 @@ class RRTPlannerNav2(Node):
         self.replan_pub = self.create_publisher(Bool, '/rrt_replan', 10)
         self.goal_reached_pub = self.create_publisher(Bool, '/rrt_goal_reached', 10)
 
+        # NEW: publish our big global map so you can see it in RViz
+        self.global_map_pub = self.create_publisher(OccupancyGrid, '/rrt_global_map', 1)
+
         self.create_timer(0.5, self.tick)
         self.create_timer(0.2, self.check_nav_status)
+        self.create_timer(0.5, self.publish_global_map)
+        self.create_timer(0.2, self.print_robot_pose)
 
-        self.get_logger().info("Kinodynamic RRTPlannerNav2 ready.")
+
+        self.get_logger().info("Kinodynamic RRTPlannerNav2 with BIG GLOBAL MAP ready.")
+
+    # ------------ Global grid helpers ------------
+
+    def init_global_grid(self, map_msg: OccupancyGrid):
+        """Initialize a large global grid that covers a big world area."""
+        self.resolution = map_msg.info.resolution
+
+        span_x = float(self.get_parameter('global_span_x').value)
+        span_y = float(self.get_parameter('global_span_y').value)
+
+        self.global_w = int(span_x / self.resolution)
+        self.global_h = int(span_y / self.resolution)
+
+        mx = map_msg.info.origin.position.x
+        my = map_msg.info.origin.position.y
+
+        # BIG FIX: Keep SAME origin as Nav2’s map
+        self.global_ox = mx
+        self.global_oy = my
+
+
+        self.global_grid = np.full(
+            (self.global_h, self.global_w), -1, dtype=np.int8
+        )
+
+        self.global_initialized = True
+
+        self.get_logger().info(
+            f"Initialized BIG global grid {self.global_w}x{self.global_h} "
+            f"({span_x:.1f}m x {span_y:.1f}m) origin=({self.global_ox:.2f},{self.global_oy:.2f})"
+        )
+
+    def print_robot_pose(self):
+        # Only print while following a Nav2 path
+        if not self.task_active:
+            return
+
+        pose, frame = self.get_robot_pose()
+        if pose is None:
+            return
+
+        x, y, th = pose
+        self.get_logger().info(f"[ROBOT] x={x:.3f}, y={y:.3f}, th={th:.3f}")
+
+    def world_to_global_ij(self, x, y):
+        """World (x,y) → global grid indices (i,j)."""
+        i = int((x - self.global_ox) / self.resolution)
+        j = int((y - self.global_oy) / self.resolution)
+        return i, j
+
+    def inside_global(self, i, j):
+        return 0 <= i < self.global_w and 0 <= j < self.global_h
 
     # ------------ Occupancy Grid handling ------------
     def on_map(self, msg: OccupancyGrid):
-        self.resolution = msg.info.resolution
-        self.w = msg.info.width
-        self.h = msg.info.height
-        self.ox = msg.info.origin.position.x
-        self.oy = msg.info.origin.position.y
+        # First time: initialize big global grid
+        if not self.global_initialized:
+            self.init_global_grid(msg)
 
-        data = np.array(msg.data, dtype=np.int16).reshape(self.h, self.w)
+        # Save local map info
+        self.map_w = msg.info.width
+        self.map_h = msg.info.height
+        self.map_ox = msg.info.origin.position.x
+        self.map_oy = msg.info.origin.position.y
 
-        # Create grid: 0=free, 1=occupied, -1=unknown
-        grid = np.zeros_like(data, dtype=np.int8)
-        grid[data == -1] = -1
-        grid[data >= 50] = 1
+        data = np.array(msg.data, dtype=np.int16).reshape(self.map_h, self.map_w)
+
+        # Local grid: -1 unknown, 0 free, 1 occupied
+        local_grid = np.zeros_like(data, dtype=np.int8)
+        local_grid[data == -1] = -1
+        local_grid[data >= 50] = 1
+        local_grid[(data >= 0) & (data < 50)] = 0
 
         # Inflate obstacles by robot_radius + safety_margin
         rad = float(self.get_parameter('robot_radius').value) + \
@@ -114,39 +189,85 @@ class RRTPlannerNav2(Node):
 
         if rad > 0.0:
             r_cells = max(1, int(rad / self.resolution))
-            occ = (grid == 1).astype(np.uint8)
+            occ = (local_grid == 1).astype(np.uint8)
             dil = occ.copy()
 
             for di in range(-r_cells, r_cells + 1):
                 for dj in range(-r_cells, r_cells + 1):
                     if di * di + dj * dj <= r_cells * r_cells:
-                        ys = slice(max(0, dj), self.h if dj >= 0 else self.h + dj)
-                        xs = slice(max(0, di), self.w if di >= 0 else self.w + di)
-                        ys2 = slice(max(0, -dj), self.h - max(0, dj))
-                        xs2 = slice(max(0, -di), self.w - max(0, di))
+                        ys = slice(max(0, dj), self.map_h if dj >= 0 else self.map_h + dj)
+                        xs = slice(max(0, di), self.map_w if di >= 0 else self.map_w + di)
+                        ys2 = slice(max(0, -dj), self.map_h - max(0, dj))
+                        xs2 = slice(max(0, -di), self.map_w - max(0, di))
                         dil[ys, xs] |= occ[ys2, xs2]
 
-            grid[dil > 0] = 1
+            local_grid[dil > 0] = 1
 
-        self.grid = grid
-        self.get_logger().info("Map received.")
+        # Fuse local inflated grid into BIG global grid
+        for j in range(self.map_h):
+            wy = self.map_oy + j * self.resolution
+            for i in range(self.map_w):
+                wx = self.map_ox + i * self.resolution
+                gi, gj = self.world_to_global_ij(wx, wy)
+                if not self.inside_global(gi, gj):
+                    continue
+                src = local_grid[j, i]
+                dst = self.global_grid[gj, gi]
+
+                # Priority: OCC (1) > FREE (0) > UNKNOWN (-1)
+                if src == 1:
+                    self.global_grid[gj, gi] = 1
+                elif src == 0:
+                    self.global_grid[gj, gi] = 0      # allow clearing
+                elif src == -1:
+                    if dst == -1:
+                        self.global_grid[gj, gi] = 0
+                # if src == -1, keep existing dst
+
+        #self.get_logger().info("Map received and fused into BIG global grid.")
+
+    # ------------ Global map visualization ------------
+    def publish_global_map(self):
+        if self.global_grid is None or not self.global_initialized:
+            return
+
+        msg = OccupancyGrid()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+
+        msg.info.resolution = self.resolution
+        msg.info.width = self.global_w
+        msg.info.height = self.global_h
+        msg.info.origin.position.x = self.global_ox
+        msg.info.origin.position.y = self.global_oy
+        msg.info.origin.orientation.w = 1.0
+
+        flat = []
+        for j in range(self.global_h):
+            for i in range(self.global_w):
+                v = self.global_grid[j, i]
+                if v == 1:
+                    flat.append(100)
+                elif v == 0:
+                    flat.append(0)
+                else:
+                    flat.append(-1)
+
+        msg.data = flat
+        self.global_map_pub.publish(msg)
 
     # ------------ Helpers ------------
-    def world_to_grid(self, x, y):
-        i = int((x - self.ox) / self.resolution)
-        j = int((y - self.oy) / self.resolution)
-        return i, j
-
-    def inside(self, i, j):
-        return 0 <= i < self.w and 0 <= j < self.h
-
     def is_free_xy(self, x, y) -> bool:
-        if self.grid is None:
+        """Collision check using BIG global grid."""
+        if self.global_grid is None:
             return False
-        i, j = self.world_to_grid(x, y)
-        if not self.inside(i, j):
-            return False
-        v = self.grid[j, i]
+
+        gi, gj = self.world_to_global_ij(x, y)
+        if not self.inside_global(gi, gj):
+            # Outside our big global grid: treat as unknown
+            return bool(self.get_parameter('unknown_is_free').value)
+
+        v = self.global_grid[gj, gi]
         if v == 1:
             return False
         if v == -1:
@@ -154,6 +275,7 @@ class RRTPlannerNav2(Node):
         return True
 
     def project_to_free(self, x, y, max_r=1.0):
+        """Find nearest free cell in global grid around (x,y)."""
         step = self.resolution
         for r in np.arange(0.0, max_r + 1e-6, step):
             for th in np.linspace(0, 2 * math.pi, 48):
@@ -216,8 +338,9 @@ class RRTPlannerNav2(Node):
             if random.random() < goal_bias:
                 x_rand, y_rand, th_rand = goal
             else:
-                xw = random.uniform(self.ox, self.ox + self.w * self.resolution)
-                yw = random.uniform(self.oy, self.oy + self.h * self.resolution)
+                # Sample ANYWHERE in the BIG global grid
+                xw = random.uniform(self.global_ox, self.global_ox + self.global_w * self.resolution)
+                yw = random.uniform(self.global_oy, self.global_oy + self.global_h * self.resolution)
                 x_rand = xw - origin_x
                 y_rand = yw - origin_y
                 th_rand = random.uniform(-math.pi, math.pi)
@@ -239,11 +362,20 @@ class RRTPlannerNav2(Node):
                 yaw_err = (desired_yaw - nearest[2] + math.pi) % (2 * math.pi) - math.pi
 
                 if random.random() < steer_p:
+                    # steer toward the sample
                     w = max(-w_max, min(w_max, yaw_err / step_time))
                     u = 0.8 * v_max if abs(yaw_err) < math.pi / 3 else 0.4 * v_max
                 else:
-                    u = random.uniform(0, v_max)
-                    w = random.uniform(-w_max, w_max)
+                    # bias toward big forward moves
+                    if random.random() < 0.8:
+                        u = random.uniform(0.7 * v_max, v_max)
+                    else:
+                        u = random.uniform(0.0, v_max)
+                    # bias to mostly-straight
+                    if random.random() < 0.7:
+                        w = random.uniform(-0.4 * w_max, 0.4 * w_max)
+                    else:
+                        w = random.uniform(-w_max, w_max)
 
                 x, y, th = nearest
                 t = 0.0
@@ -255,12 +387,12 @@ class RRTPlannerNav2(Node):
                     y += u * math.sin(th) * dt
                     th += w * dt
 
-                    # Basic collision check at robot center
+                    # Basic collision check
                     if not self.is_free_xy(x + origin_x, y + origin_y):
                         valid = False
                         break
 
-                    # Extra buffer in front if moving forward (0–180 deg sector)
+                    # Extra buffer in front
                     if u > 0.0 and front_extra > 0.0:
                         xf = x + front_extra * math.cos(th)
                         yf = y + front_extra * math.sin(th)
@@ -268,7 +400,7 @@ class RRTPlannerNav2(Node):
                             valid = False
                             break
 
-                    # Optional: extra buffer behind when reversing
+                    # Optional extra buffer behind
                     if u < 0.0 and rear_extra > 0.0:
                         xb = x - rear_extra * math.cos(th)
                         yb = y - rear_extra * math.sin(th)
@@ -341,11 +473,10 @@ class RRTPlannerNav2(Node):
 
     # ------------ Main periodic tick ------------
     def tick(self):
-        # No map or already finished (success or failure)
-        if self.grid is None or self.success_announced:
+        # Need global map and not already done
+        if not self.global_initialized or self.success_announced:
             return
 
-        # If Nav2 is currently executing a task, don't replan
         if self.task_active:
             return
 
@@ -364,7 +495,7 @@ class RRTPlannerNav2(Node):
 
         start_world = (sproj[0], sproj[1], th)
 
-        # ---- Set local origin ONCE ----
+        # Set local origin ONCE
         if not self.initial_origin_set:
             self.local_origin = (start_world[0], start_world[1])
             self.initial_origin_set = True
@@ -374,27 +505,21 @@ class RRTPlannerNav2(Node):
 
         origin_x, origin_y = self.local_origin
 
-        # Convert robot pose into fixed local frame
+        # Convert start to local frame
         start_local = (
             start_world[0] - origin_x,
             start_world[1] - origin_y,
             start_world[2],
         )
 
-        # ---- Goal in world frame ----
-        goal_world_raw = (
-            float(self.get_parameter('goal_x').value),
-            float(self.get_parameter('goal_y').value),
-            0.0,
-        )
+        # ---- Goal in world frame (ORIGINAL, NEVER CLIPPED) ----
+        gx = float(self.get_parameter('goal_x').value)
+        gy = float(self.get_parameter('goal_y').value)
+        goal_world_raw = (gx, gy, 0.0)
+        self.current_goal_world = goal_world_raw
 
-        gproj = self.project_to_free(goal_world_raw[0], goal_world_raw[1], max_r=2.0)
-        if gproj is None:
-            self.get_logger().warn("Goal not projectable to free space.")
-            return
-
-        goal_world = (gproj[0], gproj[1], 0.0)
-        self.current_goal_world = goal_world
+        # We DO NOT project the goal to free space; we plan toward the real one.
+        goal_world = goal_world_raw
 
         # Convert goal to local frame
         goal_local = (
@@ -410,7 +535,7 @@ class RRTPlannerNav2(Node):
 
         self.get_logger().info(
             f"Planning in LOCAL frame: start=({start_local[0]:.2f},{start_local[1]:.2f}) "
-            f"goal=({goal_local[0]:.2f},{goal_local[1]:.2f})"
+            f"goal=({goal_local[0]:.2f},{goal_local[1]:.2f}) "
         )
 
         path_local = self.kinodynamic_rrt_once(
@@ -443,6 +568,7 @@ class RRTPlannerNav2(Node):
             self.nav.followWaypoints(poses)
 
         self.task_active = True
+
     # ------------ Nav2 status monitoring ------------
     def check_nav_status(self):
         if not self.task_active or self.success_announced:
@@ -455,74 +581,19 @@ class RRTPlannerNav2(Node):
         self.task_active = False
 
         goal_radius = float(self.get_parameter('goal_radius').value)
-
         close_enough = False
 
-        # -------------------------------
-        # NEW ODOM-BASED GOAL DISTANCE CHECK
-        # -------------------------------
         try:
-            # robot in odom
             trot = self.tf.lookup_transform("odom", "base_footprint", rclpy.time.Time())
             rx = trot.transform.translation.x
             ry = trot.transform.translation.y
 
-            # goal (currently stored in map frame) -> transform to odom
             gx, gy, _ = self.current_goal_world
-            # ---------------------------------------------------------
-            # DEBUG PRINTS: robot & goal in map, odom, and local RRT
-            # ---------------------------------------------------------
-
-            # Robot in MAP frame
-            try:
-                t_map = self.tf.lookup_transform("map", "base_footprint", rclpy.time.Time())
-                self.get_logger().info(
-                    f"[DEBUG] Robot (map): x={t_map.transform.translation.x:.3f}, "
-                    f"y={t_map.transform.translation.y:.3f}"
-                )
-            except Exception:
-                self.get_logger().warn("[DEBUG] Could not get robot pose in map frame")
-
-            # Goal in MAP frame
-            self.get_logger().info(
-                f"[DEBUG] Goal  (map): x={gx:.3f}, y={gy:.3f}"
-            )
-
-            # Robot in ODOM frame (we already have rx, ry)
-            self.get_logger().info(
-                f"[DEBUG] Robot (odom): x={rx:.3f}, y={ry:.3f}"
-            )
-
-            # Goal in ODOM frame (after transform)
-            goal_ps = PoseStamped()
-            goal_ps.header.frame_id = "map"
-            goal_ps.pose.position.x = gx
-            goal_ps.pose.position.y = gy
-            goal_odom = self.tf.transform(goal_ps, "odom")
-
-            gx_o = goal_odom.pose.position.x
-            gy_o = goal_odom.pose.position.y
-
-            self.get_logger().info(
-                f"[DEBUG] Goal  (odom): x={gx_o:.3f}, y={gy_o:.3f}"
-            )
-
-            # Also print the LOCAL RRT frame values
-            origin_x, origin_y = self.local_origin
-
-            self.get_logger().info(
-                f"[DEBUG] Local RRT Start: x={(rx - origin_x):.3f}, y={(ry - origin_y):.3f}"
-            )
-
-            self.get_logger().info(
-                f"[DEBUG] Local RRT Goal: x={(gx - origin_x):.3f}, y={(gy - origin_y):.3f}"
-            )
 
             goal_ps = PoseStamped()
             goal_ps.header.frame_id = "map"
             goal_ps.pose.position.x = gx
             goal_ps.pose.position.y = gy
-
             goal_odom = self.tf.transform(goal_ps, "odom")
 
             gx_o = goal_odom.pose.position.x
@@ -536,7 +607,6 @@ class RRTPlannerNav2(Node):
             self.get_logger().warn(f"Transform error in odom distance check: {e}")
             close_enough = False
 
-        # If Nav2 succeeded OR physically close:
         if result == TaskResult.SUCCEEDED or close_enough:
             self.get_logger().info(f"Goal reached (Nav2 result={result}). Stopping.")
             self.announce_success()

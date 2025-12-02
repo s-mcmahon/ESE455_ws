@@ -1,0 +1,36 @@
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+
+      global_frame: map
+      robot_base_frame: base_link
+      use_sim_time: false
+
+      # ⭐ MAKE THE MAP MUCH BIGGER
+      width: 100.0         # meters
+      height: 100.0        # meters
+      resolution: 0.05
+
+      # ⭐ PLACE ORIGIN SO YOUR WHOLE AREA FITS INSIDE MAP
+      origin_x: -5.0
+      origin_y: -5.0
+
+      track_unknown_space: true
+      always_send_full_costmap: true
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+
+      global_frame: map
+      robot_base_frame: base_link
+      use_sim_time: false
+
+      width: 5.0
+      height: 5.0
+      resolution: 0.05
+      rolling_window: true
