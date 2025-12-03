@@ -16,7 +16,7 @@ from std_msgs.msg import Bool
 
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from tf2_ros import Buffer, TransformListener
-
+from tf2_geometry_msgs import do_transform_pose
 
 # ------------ Angle helper ------------
 def q_from_yaw(yaw: float) -> Quaternion:
@@ -31,23 +31,23 @@ class RRTPlannerNav2(Node):
         super().__init__('rrt_planner_nav2')
 
         # ---------------- Parameters ----------------
-        self.declare_parameter('robot_radius', 0.25)
+        self.declare_parameter('robot_radius', 0.20)
         self.declare_parameter('safety_margin', 0.0)
-        self.declare_parameter('front_buffer_extra', 0.1)
-        self.declare_parameter('rear_buffer_extra', 0.0)
+        self.declare_parameter('front_buffer_extra', 0.3)
+        self.declare_parameter('rear_buffer_extra', 0.1)
         self.declare_parameter('max_iters', 1000)
-        self.declare_parameter('goal_bias', 0.5)
-        self.declare_parameter('goal_radius', 0.3)  # be a bit generous
+        self.declare_parameter('goal_bias', 0.3)
+        self.declare_parameter('goal_radius', 0.2)  # be a bit generous
         self.declare_parameter('goal_x', 3.8)
         self.declare_parameter('goal_y', 3.8)
         self.declare_parameter('unknown_is_free', True)
         self.declare_parameter('v_max', 0.25)
         self.declare_parameter('w_max', 1.82)
-        self.declare_parameter('dt', 0.1)
-        self.declare_parameter('step_time', 1.0)
+        self.declare_parameter('dt', 0.05)
+        self.declare_parameter('step_time', 0.5)
         self.declare_parameter('controls_per_expand', 40)
         self.declare_parameter('steer_to_goal_prob', 0.6)
-        self.declare_parameter('min_waypoint_separation', 0.6)
+        self.declare_parameter('min_waypoint_separation', 0.4)
         self.declare_parameter('max_waypoints', 30)
 
         # Big global map span (meters) for our own fused map
@@ -55,7 +55,7 @@ class RRTPlannerNav2(Node):
         self.declare_parameter('global_span_y', 40.0)  # total height in meters
 
         if not self.has_parameter('use_sim_time'):
-            self.declare_parameter('use_sim_time', True)
+            self.declare_parameter('use_sim_time', False)
 
         # ---------------- State ----------------
         # Original Nav2 map info
@@ -361,21 +361,29 @@ class RRTPlannerNav2(Node):
 
                 yaw_err = (desired_yaw - nearest[2] + math.pi) % (2 * math.pi) - math.pi
 
+                # --- NEW more aggressive control selection ---
                 if random.random() < steer_p:
-                    # steer toward the sample
+                    # Steer toward the sample, but don't kill speed
                     w = max(-w_max, min(w_max, yaw_err / step_time))
-                    u = 0.8 * v_max if abs(yaw_err) < math.pi / 3 else 0.4 * v_max
-                else:
-                    # bias toward big forward moves
-                    if random.random() < 0.8:
-                        u = random.uniform(0.7 * v_max, v_max)
+
+                    # Only reduce speed a little for *really* large heading errors
+                    if abs(yaw_err) > 2.5:     # ~145 deg, basically turning around
+                        u = 0.6 * v_max
+                    elif abs(yaw_err) > 1.5:   # ~85 deg
+                        u = 0.8 * v_max
                     else:
-                        u = random.uniform(0.0, v_max)
-                    # bias to mostly-straight
+                        u = v_max
+                else:
+                    # Random controls: bias to pretty fast motion
+                    fast_min = 0.7 * v_max
+                    u = random.uniform(fast_min, v_max)
+
+                    # Mostly straight, but allow some decent turning
                     if random.random() < 0.7:
-                        w = random.uniform(-0.4 * w_max, 0.4 * w_max)
+                        w = random.uniform(-0.5 * w_max, 0.5 * w_max)
                     else:
                         w = random.uniform(-w_max, w_max)
+                # --- end new control selection ---
 
                 x, y, th = nearest
                 t = 0.0
@@ -473,13 +481,17 @@ class RRTPlannerNav2(Node):
 
     # ------------ Main periodic tick ------------
     def tick(self):
-        # Need global map and not already done
+        # Must have a global map, and must not be permanently shut down
         if not self.global_initialized or self.success_announced:
             return
 
-        if self.task_active:
+        # Enforce replan cooldown to avoid spamming
+        now = time.time()
+        if now - self.last_plan_time < self.plan_cooldown:
             return
+        self.last_plan_time = now
 
+        # Get robot pose
         pose, parent_frame = self.get_robot_pose()
         if pose is None:
             self.get_logger().info("Waiting for TF in map frame...")
@@ -487,10 +499,10 @@ class RRTPlannerNav2(Node):
 
         x, y, th = pose
 
-        # Project current robot pose into free space
+        # Project start into free space
         sproj = self.project_to_free(x, y, max_r=0.5)
         if sproj is None:
-            self.get_logger().warn("Start in collision.")
+            self.get_logger().warn("Start in collision — cannot plan.")
             return
 
         start_world = (sproj[0], sproj[1], th)
@@ -505,39 +517,32 @@ class RRTPlannerNav2(Node):
 
         origin_x, origin_y = self.local_origin
 
-        # Convert start to local frame
+        # Convert start → local frame
         start_local = (
             start_world[0] - origin_x,
             start_world[1] - origin_y,
             start_world[2],
         )
 
-        # ---- Goal in world frame (ORIGINAL, NEVER CLIPPED) ----
+        # Goal in world frame (NOT projected/altered)
         gx = float(self.get_parameter('goal_x').value)
         gy = float(self.get_parameter('goal_y').value)
-        goal_world_raw = (gx, gy, 0.0)
-        self.current_goal_world = goal_world_raw
+        goal_world = (gx, gy, 0.0)
+        self.current_goal_world = goal_world
 
-        # We DO NOT project the goal to free space; we plan toward the real one.
-        goal_world = goal_world_raw
-
-        # Convert goal to local frame
+        # Convert goal → local frame
         goal_local = (
             goal_world[0] - origin_x,
             goal_world[1] - origin_y,
             0.0,
         )
 
-        now = time.time()
-        if now - self.last_plan_time < self.plan_cooldown:
-            return
-        self.last_plan_time = now
-
         self.get_logger().info(
             f"Planning in LOCAL frame: start=({start_local[0]:.2f},{start_local[1]:.2f}) "
-            f"goal=({goal_local[0]:.2f},{goal_local[1]:.2f}) "
+            f"goal=({goal_local[0]:.2f},{goal_local[1]:.2f})"
         )
 
+        # Run RRT
         path_local = self.kinodynamic_rrt_once(
             start=start_local,
             goal=goal_local,
@@ -548,20 +553,29 @@ class RRTPlannerNav2(Node):
             self.get_logger().warn("No path found.")
             return
 
-        # Convert back to world frame
+        # Convert to world frame
         path_world = [
             (px + origin_x, py + origin_y, th)
             for (px, py, th) in path_local
         ]
 
+        # Downsample
         path_ds = self.downsample_path(path_world)
-        poses, _ = self.publish_path(path_ds)
 
+        poses, _ = self.publish_path(path_ds)
         if not poses:
             self.get_logger().warn("No poses to send to Nav2.")
             return
 
-        # Send to Nav2
+        # ❗ Cancel previous Nav2 plan if we are currently running one
+        if self.task_active:
+            self.get_logger().info("Canceling previous Nav2 task for replanning...")
+            try:
+                self.nav.cancelTask()
+            except Exception:
+                pass
+
+        # Send new plan to Nav2
         if len(poses) <= 2:
             self.nav.goToPose(poses[-1])
         else:
@@ -569,54 +583,77 @@ class RRTPlannerNav2(Node):
 
         self.task_active = True
 
+
+
     # ------------ Nav2 status monitoring ------------
     def check_nav_status(self):
+        # If no Nav2 task is active, nothing to check
         if not self.task_active or self.success_announced:
             return
 
+        # Nav2 still executing the path → do nothing
         if not self.nav.isTaskComplete():
             return
 
+        # We have a result → read it
         result = self.nav.getResult()
+
+        # Allow tick() to replan again
         self.task_active = False
 
+        # If WE cancelled the task (because tick() replans frequently)
+        if result == TaskResult.CANCELED:
+            self.get_logger().info("Nav2 task canceled (likely due to replanning).")
+            return  # do NOT treat this as failure
+
+        # --- Check whether robot is close enough to the goal ---
         goal_radius = float(self.get_parameter('goal_radius').value)
         close_enough = False
 
         try:
-            trot = self.tf.lookup_transform("odom", "base_footprint", rclpy.time.Time())
-            rx = trot.transform.translation.x
-            ry = trot.transform.translation.y
-
+            # Extract stored goal
             gx, gy, _ = self.current_goal_world
+
+            # Transform goal (map frame) into odom frame
+            t_map_to_odom = self.tf.lookup_transform(
+                "odom", "map", rclpy.time.Time()
+            )
 
             goal_ps = PoseStamped()
             goal_ps.header.frame_id = "map"
             goal_ps.pose.position.x = gx
             goal_ps.pose.position.y = gy
-            goal_odom = self.tf.transform(goal_ps, "odom")
+            goal_ps.pose.orientation.w = 1.0
 
+            goal_odom = do_transform_pose(goal_ps, t_map_to_odom)
             gx_o = goal_odom.pose.position.x
             gy_o = goal_odom.pose.position.y
 
+            # Get robot pose in odom frame
+            trot = self.tf.lookup_transform("odom", "base_footprint", rclpy.time.Time())
+            rx = trot.transform.translation.x
+            ry = trot.transform.translation.y
+
             dist = math.hypot(gx_o - rx, gy_o - ry)
             self.get_logger().info(f"[ODOM dist] {dist:.3f}")
+
             close_enough = dist < goal_radius
 
         except Exception as e:
             self.get_logger().warn(f"Transform error in odom distance check: {e}")
             close_enough = False
 
+        # --- SUCCESS ---
         if result == TaskResult.SUCCEEDED or close_enough:
-            self.get_logger().info(f"Goal reached (Nav2 result={result}). Stopping.")
+            self.get_logger().info("Goal reached. Stopping.")
             self.announce_success()
-        else:
-            self.get_logger().warn(f"Nav2 failed with result={result}. Goal unreachable, stopping.")
-            try:
-                self.nav.cancelTask()
-            except Exception:
-                pass
-            self.success_announced = True
+            return
+
+        # --- FAILURE (but we keep running so replanning happens) ---
+        self.get_logger().warn(
+            f"Nav2 ended with result={result}. Replanning will continue."
+        )
+
 
     # ------------ Goal reached handling ------------
     def announce_success(self):
